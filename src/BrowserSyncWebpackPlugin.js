@@ -6,10 +6,53 @@ const browserSync = require('browser-sync');
 const merge = require('webpack-merge');
 
 const { desire, uniq } = require('./util');
+const sysPath = require('path');
 
 const htmlInjector = desire('bs-html-injector');
-const webpackDevMiddleware = desire('webpack-dev-middleware');
+
+let webpackDevMiddleware = desire('webpack-dev-middleware');
+if (webpackDevMiddleware) {
+	webpackDevMiddleware =
+		webpackDevMiddleware.default || webpackDevMiddleware;
+}
+
 const webpackHotMiddleware = desire('webpack-hot-middleware');
+
+function urlencodePath(filePath) {
+	return filePath.split('/').map(encodeURIComponent).join('/');
+}
+
+function appendHash(url, hash) {
+	if (!url) {
+		return url;
+	}
+	return url + (url.indexOf('?') === -1 ? '?' : '&') + hash;
+}
+
+function isAssetPresent(html, src) {
+	let pattern;
+	if (/\.js(\?.*)?$/.test(src)) {
+		pattern = new RegExp(`\\s+src=['"][^'"]+${src}['"]"`, 'g');
+	}
+
+	if (/\.css$/.test(src)) {
+		pattern = new RegExp(`\\s+href=['"][^'"]+${src}['"]`, 'g');
+	}
+
+	return pattern && pattern.test(html);
+}
+
+function assetTag(src) {
+	if (/\.js$/.test(src)) {
+		return `<script src="${src}"></script>`;
+	}
+
+	if (/\.css$/.test(src)) {
+		return `<link rel="stylesheet" href="${src}">`;
+	}
+
+	return '';
+}
 
 /**
  * BrowserSyncWebpackPlugin
@@ -24,6 +67,7 @@ module.exports = class BrowserSyncWebpackPlugin extends EventEmitter {
 	 */
 	constructor(options, watcher = browserSync.create()) {
 		super();
+		this.pluginName = 'BrowserSyncWebpackPlugin';
 		this.open = true;
 		this.compiler = null;
 		this.middleware = [];
@@ -31,6 +75,8 @@ module.exports = class BrowserSyncWebpackPlugin extends EventEmitter {
 		this.resolvers = [];
 		this.watcher = watcher;
 		this.watcherConfig = {};
+		this.runtimePublicPath = null;
+		this.webpackAssetUrls = [];
 		this.options = merge(
 			{
 				proxyUrl: 'https://localhost:3000',
@@ -69,10 +115,11 @@ module.exports = class BrowserSyncWebpackPlugin extends EventEmitter {
 			);
 			this.on(event, this.options.events[event]);
 		});
+
 		this.on('webpack.compilation', () =>
 			this.watcher.notify('Rebuilding...')
 		);
-		this.once('webpack.done', this.start.bind(this));
+
 		this.on('ready', () => {
 			this.ready = true;
 		});
@@ -91,14 +138,125 @@ module.exports = class BrowserSyncWebpackPlugin extends EventEmitter {
 		}
 		this.registerEvents();
 		this.compiler = compiler;
-		compiler.plugin(
-			'done',
-			this.emit.bind(this, 'webpack.done', this)
-		);
-		compiler.plugin(
-			'compilation',
-			this.emit.bind(this, 'webpack.compilation', this)
-		);
+		const pluginName = this.pluginName;
+
+		if (compiler.hooks) {
+			compiler.hooks.done.tapAsync(
+				pluginName,
+				({ compilation }, callback) => {
+					const assets = Array.from(
+						compilation.assetsInfo.keys()
+					);
+
+					let {
+						publicPath,
+					} = compilation.outputOptions;
+					if (
+						publicPath &&
+						publicPath.substring(
+							publicPath.length - 1
+						) !== '/'
+					) {
+						publicPath += '/';
+					}
+
+					this.webpackAssetUrls.push(
+						...assets
+							.filter(asset =>
+								[
+									'hmr.js',
+									'runtime.js',
+								].includes(
+									sysPath.basename(
+										asset
+									)
+								)
+							)
+							.map(
+								asset =>
+									`${publicPath}${asset}`
+							)
+					);
+
+					callback();
+				}
+			);
+
+			compiler.hooks.compilation.tap(
+				pluginName,
+				this.emit.bind(
+					this,
+					'webpack.compilation',
+					this
+				)
+			);
+
+			compiler.hooks.emit.tapAsync(
+				pluginName,
+				(compilation, callback) => {
+					const compilationHash =
+						compilation.hash;
+					let publicPath = compilation.mainTemplate.getPublicPath(
+						{ hash: compilationHash }
+					);
+					if (
+						publicPath.length &&
+						publicPath.substr(-1, 1) !== '/'
+					) {
+						publicPath += '/';
+					}
+
+					const entries = Array.from(
+						compilation.entrypoints.keys()
+					);
+
+					for (
+						let i = 0;
+						i < entries.length;
+						i++
+					) {
+						const entryName = entries[i];
+						const entryPointFiles = compilation.entrypoints
+							.get(entryName)
+							.getFiles();
+
+						const entryPointPublicPaths = entryPointFiles.map(
+							chunkFile => {
+								const entryPointPublicPath =
+									publicPath +
+									urlencodePath(
+										chunkFile
+									);
+
+								return this
+									.options
+									.hash
+									? appendHash(
+											entryPointPublicPath,
+											compilationHash
+										)
+									: entryPointPublicPath;
+							}
+						);
+					}
+
+					callback();
+				}
+			);
+		} else {
+			compiler.plugin(
+				'done',
+				this.emit.bind(this, 'webpack.done', this)
+			);
+			compiler.plugin(
+				'compilation',
+				this.emit.bind(
+					this,
+					'webpack.compilation',
+					this
+				)
+			);
+		}
 	}
 
 	/**
@@ -111,6 +269,7 @@ module.exports = class BrowserSyncWebpackPlugin extends EventEmitter {
 			'init',
 			this.emit.bind(this, 'ready', this, this.watcher)
 		);
+
 		this.watcher.emitter.on(
 			'file:changed',
 			(event, file, stats) => {
@@ -118,6 +277,7 @@ module.exports = class BrowserSyncWebpackPlugin extends EventEmitter {
 				this.emit(event, this, file, stats);
 			}
 		);
+
 		this.watcher.init(this.watcherConfig);
 	}
 
@@ -152,12 +312,15 @@ module.exports = class BrowserSyncWebpackPlugin extends EventEmitter {
 				),
 			});
 		}
+
 		if (webpackDevMiddleware) {
 			this.setupWebpackDevMiddleware();
 		}
+
 		if (webpackHotMiddleware) {
 			this.setupWebpackHotMiddleware();
 		}
+
 		this.config();
 		this.checkProtocols(this.options.proxyUrl, this.options.target);
 		this.emit('setup', this, this.watcherConfig);
@@ -168,22 +331,27 @@ module.exports = class BrowserSyncWebpackPlugin extends EventEmitter {
 	 * @public
 	 */
 	setupWebpackDevMiddleware() {
-		this.webpackDevMiddleware = webpackDevMiddleware(
-			this.compiler,
-			merge(
-				{
-					publicPath:
-						this.options.publicPath ||
-						this.compiler.options.output
-							.publicPath,
-					stats: false,
-					noInfo: true,
-				},
-				this.compiler.options.devServer,
-				this.options.advanced.webpackDevMiddleware
-			)
+		const devMiddlewareConfig = merge(
+			{
+				publicPath:
+					this.options.publicPath ||
+					this.compiler.options.output.publicPath,
+				// noInfo: true,
+			},
+			this.compiler.options.devServer,
+			this.options.advanced.webpackDevMiddleware
 		);
-		this.middleware.push(this.webpackDevMiddleware);
+
+		try {
+			this.webpackDevMiddleware = webpackDevMiddleware(
+				this.compiler,
+				devMiddlewareConfig
+			);
+
+			this.middleware.push(this.webpackDevMiddleware);
+		} catch (e) {
+			console.error(`webpackDevMiddleware init error: `, e);
+		}
 	}
 
 	/**
@@ -227,6 +395,49 @@ module.exports = class BrowserSyncWebpackPlugin extends EventEmitter {
 					target: this.options.target,
 					middleware: this.middleware,
 				},
+				rewriteRules: [
+					{
+						match: /<\/head>/i,
+						fn: (req, res, match) => {
+							if (
+								!this
+									.webpackAssetUrls ||
+								!this
+									.webpackAssetUrls
+									.length
+							) {
+								return match;
+							}
+
+							const assetTags = [];
+
+							if (res.data) {
+								this.webpackAssetUrls.forEach(
+									assetUrl => {
+										if (
+											!isAssetPresent(
+												res.data,
+												assetUrl
+											)
+										) {
+											assetTags.push(
+												assetTag(
+													assetUrl
+												)
+											);
+										}
+									}
+								);
+							}
+
+							return (
+								assetTags.join(
+									'\n'
+								) + match
+							);
+						},
+					},
+				],
 				files:
 					!this.useHtmlInjector() &&
 					this.options.watch
