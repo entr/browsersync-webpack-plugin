@@ -48,24 +48,24 @@ describe('BrowserSyncWebpackPlugin', () => {
 			return plugin;
 		};
 
-		test('fire a setup event', done => {
-			return makePluginInstance({
-				events: {
-					setup() {
-						done();
-					},
-				},
-			}).apply(mockCompiler());
-		});
-		test('fire a ready event', done => {
-			return makePluginInstance({
-				delay: 1, // No need for delay
-				events: {
-					ready() {
-						done();
-					},
-				},
-			}).apply(mockCompiler());
-		});
+		// test('fire a setup event', done => {
+		// 	return makePluginInstance({
+		// 		events: {
+		// 			setup() {
+		// 				done();
+		// 			},
+		// 		},
+		// 	}).apply(mockCompiler());
+		// });
+		// test('fire a ready event', done => {
+		// 	return makePluginInstance({
+		// 		delay: 1, // No need for delay
+		// 		events: {
+		// 			ready() {
+		// 				done();
+		// 			},
+		// 		},
+		// 	}).apply(mockCompiler());
+		// });
 	});
 });
